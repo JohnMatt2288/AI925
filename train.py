@@ -10,6 +10,8 @@ import torch.optim as optim
 from torchvision import transforms, datasets, models, utils
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import IterableDataset
+from torchdata.datapipes.iter.random import RandomShuffleQueue
 import more_itertools # 导入more_itertools模块
 from torchvision.transforms import functional as F # 导入torchvision.transforms.functional模块，并起一个别名F
 import PIL # 导入PIL模块
@@ -25,6 +27,15 @@ ALPHA = 0.5  # 调整此值以平衡权重，根据需要进行调整
 # 初始化计数器用于跟踪样本数量
 num_beauty_samples = 0
 num_non_beauty_samples = 0
+
+# 定义一个名为MyIterableDataset的子类
+class MyIterableDataset(IterableDataset):
+    def __init__(self, generator):
+        self.generator = generator
+
+    def __iter__(self):
+        return self.generator
+
 
 # 检查是否支持CUDA，如果支持则使用GPU，否则使用CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -124,7 +135,7 @@ def custom_collate_fn(batch):
 
 
 # 创建数据加载器，使用自定义的数据组合函数
-train_loader = DataLoader(train_data_generator(), batch_size=BATCH_SIZE, shuffle=True, collate_fn=custom_collate_fn)
+train_loader = DataLoader(RandomShuffleQueue(MyIterableDataset(train_data_generator())), batch_size=BATCH_SIZE, collate_fn=custom_collate_fn)
 
 # 定义模型并将模型移动到GPU
 model = models.resnet18(pretrained=True) # 使用预训练的resnet18作为特征提取器
