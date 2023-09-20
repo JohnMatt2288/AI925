@@ -29,7 +29,7 @@ num_non_beauty_samples = 0
 # 检查是否支持CUDA，如果支持则使用GPU，否则使用CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"使用设备：{device}")
-
+PIL.ImageFile.LOAD_TRUNCATED_IMAGES = True # 忽略错误图像
 
 def contains_person(image: PIL.Image) -> bool:
     """检测图像中是否包含人物
@@ -108,11 +108,23 @@ def train_data_generator() -> Generator[Tuple[torch.Tensor, torch.Tensor], None,
         num_non_beauty_samples += int(soft_label[1].item())
 
 
-# 创建数据加载器，判断数据集的参数是否是一个生成器对象，如果是，则转换为列表对象，如果不是，则继续使用原来的方式
-if isinstance(train_data_generator(), Generator):
-    train_loader = DataLoader(list(train_data_generator()), batch_size=BATCH_SIZE, shuffle=True)
-else:
-    train_loader = DataLoader(train_data_generator(), batch_size=BATCH_SIZE, shuffle=True)
+# 定义自定义的数据组合函数，用于处理不同大小的张量
+def custom_collate_fn(batch):
+    images = []
+    soft_labels = []
+    for image, soft_label in batch:
+        images.append(image)
+        soft_labels.append(soft_label)
+    
+    # 使用torch.cat来连接张量，而不是torch.stack
+    images = torch.cat(images)
+    soft_labels = torch.cat(soft_labels)
+
+    return images, soft_labels
+
+
+# 创建数据加载器，使用自定义的数据组合函数
+train_loader = DataLoader(train_data_generator(), batch_size=BATCH_SIZE, shuffle=True, collate_fn=custom_collate_fn)
 
 # 定义模型并将模型移动到GPU
 model = models.resnet18(pretrained=True) # 使用预训练的resnet18作为特征提取器
@@ -146,38 +158,66 @@ for epoch in range(NUM_EPOCHS):
 
         # 前向传播和计算损失
         outputs = model(inputs)
-        loss1 = criterion(outputs, torch.argmax(soft_labels, dim=1))  # 交叉熵损失，使用软标签进行计算
-        loss2 = criterion(outputs, torch.argmax(outputs, dim=1))  # 交叉熵损失，使用模型预测结果进行计算
+        loss1 = criterion(outputs, torch.argmax(soft_labels, dim=1)) # 计算交叉熵损失，使用torch.argmax来获取真实标签
+        loss2 = -torch.mean(torch.sum(soft_labels * torch.log_softmax(outputs, dim=1), dim=1)) # 计算软标签损失，使用torch.log_softmax来获取预测概率
+        loss = ALPHA * loss1 + (1 - ALPHA) * loss2 # 计算总损失，使用ALPHA来平衡两种损失
 
-# 计算总损失，使用alpha参数来平衡两个损失的权重
-loss = alpha * loss1 + (1 - alpha) * loss2
+        # 反向传播和更新参数
+        loss.backward()
+        optimizer.step()
 
-# 反向传播和更新参数
-loss.backward()
-optimizer.step()
+        # 打印统计信息
+        running_loss += loss.item()
+        if i % 200 == 199:    # 每200个批次打印一次平均损失
+            print('[%d, %5d] loss: %.3f' %
+                  (epoch + 1, i + 1, running_loss / 200))
+            writer.add_scalar('training loss', running_loss / 200,
+                              epoch * len(train_loader) + i) # 将平均损失写入tensorboard
+            
+            running_loss = 0.0
 
-# 记录损失值和累积损失值
-running_loss += loss.item()
-writer.add_scalar('Loss/iter', loss.item(), epoch * len(train_loader) + i)
+    # 调整学习率
+    scheduler.step()
 
-# 每200个批次打印一次平均损失值和当前学习率
-if (i + 1) % 200 == 0:
-    print(f'Epoch {epoch + 1}, Batch {i + 1}, Loss: {running_loss / 200:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}')
-    running_loss = 0.0
+# 保存模型
+torch.save(model.state_dict(), 'model.pth')
 
-# 调整学习率
-scheduler.step()
+# 测试模型
+model.eval()
 
-# 记录每个epoch的平均损失值
-writer.add_scalar('Loss/epoch', running_loss / len(train_loader), epoch)
+# 定义测试数据集和数据加载器
+test_data_root = 'test'
+test_data = datasets.ImageFolder(test_data_root, transform=transform)
+test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False, collate_fn=custom_collate_fn)
 
-# 保存每个epoch结束后的模型参数字典
-#model_save_path = f'trained_model_epoch_{epoch + 1}.pth'  # 相对于项目路径的相对路径
-#torch.save(model.state_dict(), model_save_path)
-#print(f"Epoch {epoch + 1} completed, model saved.")
+# 定义评估指标
+correct = 0
+total = 0
+confusion_matrix = torch.zeros(NUM_CLASSES, NUM_CLASSES)
 
-# 训练循环结束后，保存最终训练结束后的模型参数字典
-model_save_path = 'final_trained_model.pth'  # 相对于项目路径的相对路径
-torch.save(model.state_dict(), model_save_path)
-print("训练完成，模型已保存。")
+# 遍历测试数据
+with torch.no_grad():
+    for inputs, labels in test_loader:
+        # 将数据移动到GPU
+        inputs = inputs.to(device)
+        labels = labels.to(device)
 
+        # 前向传播和预测
+        outputs = model(inputs)
+        _, predicted = torch.max(outputs, 1)
+
+        # 更新评估指标
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+        for t, p in zip(labels.view(-1), predicted.view(-1)):
+            confusion_matrix[t.long(), p.long()] += 1
+
+# 打印评估结果
+print('Accuracy of the network on the test images: %d %%' % (
+    100 * correct / total))
+print('Confusion matrix:\n', confusion_matrix)
+
+# 将评估结果写入tensorboard
+writer.add_scalar('test accuracy', correct / total)
+writer.add_pr_curve('PR curve', labels, outputs[:, 1])
+writer.close()
