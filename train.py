@@ -11,11 +11,15 @@ from torchvision import transforms, datasets, models, utils
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import IterableDataset
-from torchdata.datapipes.iter.random import RandomShuffleQueue
 import more_itertools # 导入more_itertools模块
 from torchvision.transforms import functional as F # 导入torchvision.transforms.functional模块，并起一个别名F
 import PIL # 导入PIL模块
 import PIL.ImageFile # 导入PIL.ImageFile模块
+from torchdata.datapipes.iter import ListofItems
+datapipe = ListofItems([1, 2, 3, 4, 5])
+from torchdata.datapipes.iter import RandomSplitter
+train, valid = RandomSplitter(datapipe, weights={"train": 0.5, "valid": 0.5}, seed=0, total_length=10000, target="train")
+
 
 # 设置一些训练参数
 NUM_CLASSES = 2  # 两个类别：Beauty和Non-Beauty
